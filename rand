@@ -1,0 +1,519 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE_DIR="$HOME/.rand-self"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+USAGE="Usage: rand [-COUNTRY] [-download COUNTRY COUNT] [-list] [-h]
+  rand                  Random US address
+  rand -us              US address
+  rand -XX              Any 2-letter ISO country code (if activated)
+  rand -download XX 100 Activate 100 addresses for country XX
+  rand -list            Show all supported countries and their status
+  rand -h               Show this help"
+
+# ── Embedded Python fetcher (OpenStreetMap / Overpass) ────────────────────────
+
+_write_fetcher() {
+  cat << 'PYEOF'
+import sys, json, urllib.request, urllib.parse, urllib.error
+import random, time, threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+ENDPOINTS = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://overpass.openstreetmap.fr/api/interpreter',
+]
+
+HOTSPOTS = {
+    'AU': [
+        [-34.1, -33.7, 150.6, 151.4],
+        [-38.1, -37.6, 144.7, 145.2],
+        [-27.7, -27.2, 152.7, 153.2],
+        [-32.1, -31.7, 115.7, 116.1],
+        [-35.1, -34.7, 138.4, 138.8],
+    ],
+    'CA': [
+        [43.5,  43.9,  -79.7, -79.1],
+        [45.4,  45.7,  -73.9, -73.4],
+        [49.1,  49.4, -123.3,-122.9],
+        [51.0,  51.2, -114.3,-113.9],
+        [45.3,  45.6,  -75.9, -75.5],
+    ],
+    'BR': [
+        [-23.7, -23.3,  -46.8, -46.5],
+        [-22.9, -22.7,  -43.4, -43.1],
+        [-15.9, -15.6,  -48.1, -47.8],
+        [ -3.8,  -3.5,  -38.7, -38.4],
+    ],
+    'US': [
+        [40.5,  40.9,  -74.3, -73.7],
+        [33.6,  34.1,  -118.5,-118.1],
+        [41.7,  42.1,  -87.9, -87.5],
+        [29.6,  30.0,  -95.6, -95.2],
+        [33.3,  33.6,  -112.2,-111.8],
+        [39.7,  40.0,  -105.1,-104.8],
+        [47.4,  47.7,  -122.5,-122.2],
+        [37.7,  37.9,  -122.5,-122.3],
+        [25.7,  26.0,  -80.3, -80.1],
+        [42.2,  42.5,  -71.3, -71.0],
+    ],
+}
+
+BOXES = {
+    'AU': [-39.0, -10.7, 113.3, 153.6],
+    'AT': [ 46.4,  49.0,   9.5,  17.2],
+    'BE': [ 49.5,  51.5,   2.5,   6.4],
+    'BR': [-33.8,   5.3, -73.9, -28.8],
+    'CA': [ 42.0,  60.0,-141.0, -52.6],
+    'CH': [ 45.8,  47.8,   5.9,  10.5],
+    'CZ': [ 48.6,  51.1,  12.1,  18.9],
+    'DE': [ 47.3,  55.1,   5.9,  15.0],
+    'DK': [ 54.6,  57.8,   8.1,  15.2],
+    'ES': [ 36.0,  43.8,  -9.3,   4.3],
+    'FI': [ 60.0,  70.1,  20.0,  31.6],
+    'FR': [ 41.3,  51.1,  -5.1,   9.6],
+    'GB': [ 49.9,  58.7,  -6.4,   1.8],
+    'GR': [ 34.8,  41.8,  19.4,  29.6],
+    'HU': [ 45.7,  48.6,  16.1,  22.9],
+    'IE': [ 51.4,  55.4, -10.5,  -6.0],
+    'IT': [ 36.6,  47.1,   6.6,  18.5],
+    'JP': [ 31.0,  45.5, 130.0, 145.5],
+    'MX': [ 14.5,  32.7,-117.1, -86.7],
+    'NL': [ 50.7,  53.6,   3.3,   7.2],
+    'NO': [ 57.9,  71.2,   4.5,  31.1],
+    'NZ': [-46.6, -34.4, 166.4, 178.6],
+    'PL': [ 49.0,  54.9,  14.1,  24.2],
+    'PT': [ 36.8,  42.2,  -9.5,  -6.2],
+    'RO': [ 43.6,  48.3,  20.3,  30.0],
+    'SE': [ 55.3,  69.1,  11.1,  24.2],
+    'UA': [ 44.4,  52.4,  22.1,  40.2],
+    'US': [ 24.5,  49.4,-124.8, -66.9],
+    'ZA': [-34.8, -22.1,  16.5,  32.9],
+}
+
+NUMBER_LAST = {
+    'AT','BE','BR','CZ','DE','DK','ES','FI','FR','GR',
+    'HU','IE','IT','MX','NL','NO','PL','PT','RO','SE','UA','ZA',
+}
+
+COUNTRY_NAMES = {
+    'AU':'Australia','AT':'Austria','BE':'Belgium','BR':'Brazil',
+    'CA':'Canada','CH':'Switzerland','CZ':'Czech Republic','DE':'Germany',
+    'DK':'Denmark','ES':'Spain','FI':'Finland','FR':'France',
+    'GB':'United Kingdom','GR':'Greece','HU':'Hungary','IE':'Ireland',
+    'IT':'Italy','JP':'Japan','MX':'Mexico','NL':'Netherlands',
+    'NO':'Norway','NZ':'New Zealand','PL':'Poland','PT':'Portugal',
+    'RO':'Romania','SE':'Sweden','UA':'Ukraine','US':'United States',
+    'ZA':'South Africa',
+}
+
+_ep_idx = 0
+_ep_lock = threading.Lock()
+
+def _next_endpoint():
+    global _ep_idx
+    with _ep_lock:
+        ep = ENDPOINTS[_ep_idx % len(ENDPOINTS)]
+        _ep_idx += 1
+        return ep
+
+def _pick_subbox(cc):
+    if cc in HOTSPOTS:
+        s0, n0, w0, e0 = random.choice(HOTSPOTS[cc])
+    else:
+        min_lat, max_lat, min_lon, max_lon = BOXES[cc]
+        slat = min(1.0, max_lat - min_lat)
+        slon = min(1.0, max_lon - min_lon)
+        s0 = random.uniform(min_lat, max_lat - slat)
+        n0 = s0 + slat
+        w0 = random.uniform(min_lon, max_lon - slon)
+        e0 = w0 + slon
+    return round(s0, 4), round(n0, 4), round(w0, 4), round(e0, 4)
+
+def _fetch_one_batch(cc, want):
+    s, n, w, e = _pick_subbox(cc)
+    query = (f'[out:json][timeout:20];'
+             f'nwr({s},{w},{n},{e})'
+             f'["addr:housenumber"]["addr:street"];'
+             f'out center {want * 5};')
+    endpoint = _next_endpoint()
+    data = urllib.parse.urlencode({'data': query}).encode()
+    req = urllib.request.Request(endpoint, data=data,
+          headers={'User-Agent': 'rand-address-tool/1.0'})
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        result = json.load(resp)
+    elements = result.get('elements', [])
+    random.shuffle(elements)
+    country_name = COUNTRY_NAMES.get(cc, cc)
+    addresses = []
+    for el in elements:
+        tags = el.get('tags', {})
+        street   = tags.get('addr:street', '').strip()
+        num      = tags.get('addr:housenumber', '').strip()
+        if not all([street, num]):
+            continue
+        city     = (tags.get('addr:city') or tags.get('addr:suburb')
+                    or tags.get('addr:town') or tags.get('addr:village') or '').strip()
+        postcode = tags.get('addr:postcode', '').strip()
+        if not city:
+            continue
+        street_line = f"{street} {num}" if cc in NUMBER_LAST else f"{num} {street}"
+        location = f"{city}, {postcode}" if postcode else city
+        addresses.append(f"{street_line}, {location}, {country_name}")
+        if len(addresses) >= want:
+            break
+    return addresses
+
+def fetch(cc, count, silent=False):
+    if cc not in BOXES:
+        supported = ', '.join(sorted(BOXES.keys()))
+        print(f"Unsupported country: {cc}\nSupported: {supported}", file=sys.stderr)
+        sys.exit(1)
+
+    workers = min(5, max(1, (count + 49) // 50))
+    per_worker = max(20, (count + workers - 1) // workers)
+
+    if not silent:
+        print(f"  Fetching ({workers} parallel queries)...", file=sys.stderr, flush=True)
+
+    collected = []
+    seen = set()
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_fetch_one_batch, cc, per_worker) for _ in range(workers)]
+        for future in as_completed(futures):
+            try:
+                for addr in future.result():
+                    if addr not in seen:
+                        seen.add(addr)
+                        collected.append(addr)
+            except Exception as e:
+                if not silent:
+                    print(f"\n  Warning: {e}", file=sys.stderr)
+            if not silent:
+                n = min(len(collected), count)
+                print(f"\r  {n}/{count}", end='', file=sys.stderr, flush=True)
+
+    retries = 0
+    while len(collected) < count and retries < 4:
+        retries += 1
+        if not silent:
+            print(f"\r  {len(collected)}/{count} — retrying...",
+                  end='', file=sys.stderr, flush=True)
+        try:
+            for addr in _fetch_one_batch(cc, count - len(collected)):
+                if addr not in seen:
+                    seen.add(addr)
+                    collected.append(addr)
+        except Exception:
+            time.sleep(2)
+
+    if not silent:
+        print('', file=sys.stderr)
+
+    for addr in collected[:count]:
+        print(addr)
+
+    if not collected:
+        print("Error: could not fetch any addresses. Check internet connection.", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    silent = '--silent' in sys.argv
+    args   = [a for a in sys.argv[1:] if not a.startswith('--')]
+    fetch(args[0].upper(), int(args[1]), silent=silent)
+PYEOF
+}
+
+# ── Fetch addresses from Overpass and append to a file ────────────────────────
+
+_fetch_into() {
+  local cc="$1" count="$2" dest="$3" silent="${4:-}"
+  local tmppy flag=""
+  tmppy=$(mktemp /tmp/rand-fetch.XXXXXX.py)
+  _write_fetcher > "$tmppy"
+  [[ "$silent" == "silent" ]] && flag="--silent"
+  python3 "$tmppy" "$cc" "$count" $flag >> "$dest"
+  local rc=$?
+  rm -f "$tmppy"
+  return $rc
+}
+
+# ── Background top-up ─────────────────────────────────────────────────────────
+
+_topup() {
+  local cc="$1" data_file="$2"
+  _fetch_into "$cc" 200 "$data_file" silent 2>/dev/null || true
+}
+
+# ── List countries ─────────────────────────────────────────────────────────────
+
+_list_countries() {
+  # Ordered list of "code:Name" pairs
+  local entries="at:Austria au:Australia be:Belgium br:Brazil ca:Canada ch:Switzerland cz:Czech_Republic de:Germany dk:Denmark es:Spain fi:Finland fr:France gb:United_Kingdom gr:Greece hu:Hungary ie:Ireland it:Italy jp:Japan mx:Mexico nl:Netherlands no:Norway nz:New_Zealand pl:Poland pt:Portugal ro:Romania se:Sweden ua:Ukraine us:United_States za:South_Africa"
+  local total=29
+
+  echo "Supported countries (${total} total):"
+  echo ""
+
+  for entry in $entries; do
+    local cc="${entry%%:*}"
+    local name="${entry##*:}"
+    name="${name//_/ }"
+    local data_file="$STATE_DIR/${cc}_data.txt"
+    local reserve_file="$STATE_DIR/${cc}_reserve.txt"
+    local cc_up
+    cc_up=$(echo "$cc" | tr '[:lower:]' '[:upper:]')
+
+    if [[ -f "$data_file" && -s "$data_file" ]]; then
+      local count
+      count=$(wc -l < "$data_file" | tr -d ' ')
+      local reserve_left=0
+      [[ -f "$reserve_file" ]] && reserve_left=$(wc -l < "$reserve_file" | tr -d ' ')
+      if [[ $reserve_left -gt 0 ]]; then
+        printf "  ✓  %-4s %-22s (active: %d  |  reserve: %d)\n" "$cc_up" "$name" "$count" "$reserve_left"
+      else
+        printf "  ✓  %-4s %-22s (active: %d addresses)\n" "$cc_up" "$name" "$count"
+      fi
+    elif [[ -f "$reserve_file" && -s "$reserve_file" ]]; then
+      local reserve_left
+      reserve_left=$(wc -l < "$reserve_file" | tr -d ' ')
+      printf "  ◎  %-4s %-22s (reserve: %d  —  rand -download %s 100)\n" "$cc_up" "$name" "$reserve_left" "$cc"
+    else
+      printf "  ○  %-4s %-22s (not installed  —  rand -download %s 100)\n" "$cc_up" "$name" "$cc"
+    fi
+  done
+
+  echo ""
+  echo "  ✓ active   ◎ reserve (instant, no internet)   ○ needs internet"
+}
+
+# ── Download / activate addresses ─────────────────────────────────────────────
+
+_download() {
+  local cc="$1" count="$2"
+  local cc_up
+  cc_up=$(echo "$cc" | tr '[:lower:]' '[:upper:]')
+
+  # Validate country code against supported list
+  local supported="at au be br ca ch cz de dk es fi fr gb gr hu ie it jp mx nl no nz pl pt ro se ua us za"
+  local valid=0
+  local c
+  for c in $supported; do
+    [[ "$c" == "$cc" ]] && valid=1 && break
+  done
+  if [[ $valid -eq 0 ]]; then
+    echo "Error: '${cc_up}' is not a supported country. Run 'rand -list' to see available countries." >&2
+    exit 1
+  fi
+
+  local data_file="$STATE_DIR/${cc}_data.txt"
+  local ptr_file="$STATE_DIR/${cc}_ptr"
+  local reserve_file="$STATE_DIR/${cc}_reserve.txt"
+
+  mkdir -p "$STATE_DIR"
+
+  local from_reserve=0
+  local from_online=0
+
+  # Drain from local reserve first (instant, no internet)
+  if [[ -f "$reserve_file" && -s "$reserve_file" ]]; then
+    local reserve_count
+    reserve_count=$(wc -l < "$reserve_file" | tr -d ' ')
+    local take=$(( count < reserve_count ? count : reserve_count ))
+
+    if [[ $take -gt 0 ]]; then
+      head -n "$take" "$reserve_file" >> "$data_file"
+      local keep=$(( reserve_count - take ))
+      if [[ $keep -gt 0 ]]; then
+        tail -n "$keep" "$reserve_file" > "${reserve_file}.tmp"
+        mv "${reserve_file}.tmp" "$reserve_file"
+      else
+        rm -f "$reserve_file"
+      fi
+      from_reserve=$take
+    fi
+  fi
+
+  local still_needed=$(( count - from_reserve ))
+
+  # Fetch remainder from Overpass if reserve didn't cover it
+  if [[ $still_needed -gt 0 ]]; then
+    echo "Fetching ${still_needed} more from OpenStreetMap..."
+    if _fetch_into "$cc_up" "$still_needed" "$data_file"; then
+      from_online=$still_needed
+    else
+      echo "Warning: online fetch failed. Got ${from_reserve} from reserve only." >&2
+    fi
+  fi
+
+  if [[ ! -f "$ptr_file" ]]; then
+    echo "1" > "$ptr_file"
+  fi
+
+  local total
+  total=$(wc -l < "$data_file" | tr -d ' ')
+  local reserve_left=0
+  [[ -f "$reserve_file" ]] && reserve_left=$(wc -l < "$reserve_file" | tr -d ' ')
+
+  echo "Loaded ${from_reserve} from reserve, fetched ${from_online} online."
+  echo "Active: ${total} addresses  |  Reserve remaining: ${reserve_left}"
+  echo "Run: rand -${cc}"
+}
+
+# ── Arg parsing ───────────────────────────────────────────────────────────────
+
+COUNTRY=""
+
+args=("$@")
+i=0
+while [[ $i -lt ${#args[@]} ]]; do
+  arg="${args[$i]}"
+  case "$arg" in
+    -h|--help)
+      echo "$USAGE"
+      exit 0
+      ;;
+    -list|--list)
+      _list_countries
+      exit 0
+      ;;
+    -download)
+      i=$((i + 1)); DL_CC="${args[$i]:-}"
+      i=$((i + 1)); DL_COUNT="${args[$i]:-}"
+      if [[ -z "$DL_CC" || -z "$DL_COUNT" ]]; then
+        echo "Usage: rand -download COUNTRY COUNT  (e.g. rand -download de 100)" >&2
+        echo "Run 'rand -list' to see available countries." >&2
+        exit 1
+      fi
+      _download "$(echo "$DL_CC" | tr '[:upper:]' '[:lower:]')" "$DL_COUNT"
+      exit 0
+      ;;
+    -[a-zA-Z][a-zA-Z])
+      COUNTRY="${arg:1}"
+      ;;
+    *)
+      echo "Unknown option: $arg" >&2
+      echo "$USAGE" >&2
+      exit 1
+      ;;
+  esac
+  i=$((i + 1))
+done
+
+# ── Ensure data exists ────────────────────────────────────────────────────────
+
+CC=$(echo "${COUNTRY:-us}" | tr '[:upper:]' '[:lower:]')
+DATA_FILE="$STATE_DIR/${CC}_data.txt"
+PTR_FILE="$STATE_DIR/${CC}_ptr"
+
+if [[ ! -f "$DATA_FILE" || ! -s "$DATA_FILE" ]]; then
+  BUNDLE="$SCRIPT_DIR/data/${CC}.txt"
+  CC_UP=$(echo "$CC" | tr '[:lower:]' '[:upper:]')
+  if [[ -f "$BUNDLE" ]]; then
+    # Dev environment: use bundled text file directly
+    mkdir -p "$STATE_DIR"
+    python3 -c "
+import random
+lines = open('$BUNDLE').readlines()
+random.shuffle(lines)
+open('$DATA_FILE', 'w').writelines(lines)
+"
+    echo "1" > "$PTR_FILE"
+  elif [[ -f "$STATE_DIR/${CC}_reserve.txt" ]]; then
+    # Reserve installed but not yet activated — tell user to use -download
+    echo "No active data for '${CC_UP}'. Run: rand -download ${CC} 100" >&2
+    echo "(reserve available — will be instant)" >&2
+    exit 1
+  else
+    echo "No data for '${CC_UP}'. Run: rand -download ${CC} 100" >&2
+    echo "Run 'rand -list' to see all available countries." >&2
+    exit 1
+  fi
+fi
+
+# ── Serve address from local data ─────────────────────────────────────────────
+
+PTR=$(cat "$PTR_FILE" 2>/dev/null || echo "1")
+TOTAL=$(wc -l < "$DATA_FILE" | tr -d ' ')
+
+# Sanitize: non-numeric, empty, or out-of-range all default to 1
+if ! [[ "$PTR" =~ ^[0-9]+$ ]] || [[ $PTR -lt 1 ]] || [[ $PTR -gt $TOTAL ]]; then
+  PTR=1
+fi
+
+ADDRESS=$(awk "NR==${PTR}{print;exit}" "$DATA_FILE")
+
+# Wrap pointer, then write atomically (tmp+mv so concurrent readers never see an empty file)
+NEXT_PTR=$((PTR + 1))
+[[ $NEXT_PTR -gt $TOTAL ]] && NEXT_PTR=1
+_PTRTMP="${PTR_FILE}.tmp.$$"
+printf '%s\n' "$NEXT_PTR" > "$_PTRTMP" && mv "$_PTRTMP" "$PTR_FILE" || rm -f "$_PTRTMP"
+
+REMAINING=$((TOTAL - PTR))
+if [[ $REMAINING -lt 50 ]]; then
+  _topup "$CC" "$DATA_FILE" &
+fi
+
+# ── Normalize ─────────────────────────────────────────────────────────────────
+
+ADDRESS=$(echo "$ADDRESS" | sed -E 's/([0-9]{5})-[0-9]{4}/\1/g')
+
+# ── Format output ──────────────────────────────────────────────────────────────
+
+IFS=',' read -ra PARTS <<< "$ADDRESS"
+
+LINES=()
+i=0
+while [[ $i -lt ${#PARTS[@]} ]]; do
+  part="${PARTS[$i]}"
+  part="${part#"${part%%[![:space:]]*}"}"
+  part="${part%"${part##*[![:space:]]}"}"
+  if [[ -n "$part" ]]; then
+    LINES+=("$part")
+  fi
+  ((i++))
+done
+
+if [[ "${LINES[0]}" =~ ^(Apt\.?|Suite|Unit|Ste\.?|#)[[:space:]]+([^[:space:]]+)[[:space:]]+([0-9]+[[:space:]].+)$ ]]; then
+  APT_PART="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+  STREET_PART="${BASH_REMATCH[3]}"
+  LINES=("$STREET_PART" "$APT_PART" "${LINES[@]:1}")
+fi
+
+CLIPBOARD=$(printf "%s, " "${LINES[@]}"); CLIPBOARD="${CLIPBOARD%, }"
+echo -n "$CLIPBOARD" | pbcopy
+
+# ── Draw box ───────────────────────────────────────────────────────────────────
+
+LABEL="Random Address"
+[[ -n "$COUNTRY" ]] && LABEL="Random Address ($(echo "$COUNTRY" | tr '[:lower:]' '[:upper:]'))"
+MAX_LEN=${#LABEL}
+for line in "${LINES[@]}"; do
+  [[ ${#line} -gt $MAX_LEN ]] && MAX_LEN=${#line}
+done
+WIDTH=$((MAX_LEN + 6))
+
+CYAN=$(tput bold 2>/dev/null && tput setaf 6 2>/dev/null || true)
+RESET=$(tput sgr0 2>/dev/null || true)
+
+DASHES=$(( WIDTH - ${#LABEL} - 4 ))
+LEFT_DASHES=$(( DASHES / 2 ))
+RIGHT_DASHES=$(( DASHES - LEFT_DASHES ))
+
+LEFT_STR=$(printf '─%.0s' $(seq 1 $LEFT_DASHES))
+RIGHT_STR=$(printf '─%.0s' $(seq 1 $RIGHT_DASHES))
+
+BOTTOM_BAR="└"
+while [[ ${#BOTTOM_BAR} -lt $((WIDTH - 1)) ]]; do BOTTOM_BAR+="─"; done
+BOTTOM_BAR+="┘"
+
+printf "┌%s ${CYAN}%s${RESET} %s┐\n" "$LEFT_STR" "$LABEL" "$RIGHT_STR"
+for line in "${LINES[@]}"; do
+  PADDING=$((WIDTH - ${#line} - 6))
+  printf "│  %s%*s  │\n" "$line" "$PADDING" ""
+done
+echo "$BOTTOM_BAR"
+echo "(copied to clipboard)"

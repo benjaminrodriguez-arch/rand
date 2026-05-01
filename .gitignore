@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Claude Code internal files
+.claude/
+
+# Runtime state (lives in ~/.rand-self, not the repo)
+*.rand-self/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
