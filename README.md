@@ -3,11 +3,12 @@
 A macOS terminal command that outputs a real, navigable random address and copies it to your clipboard. Works fully offline after install — no API key, no account.
 
 ```
-┌─ Random Address ──────────────────────┐
-│  1847 Elm Street                      │
-│  Austin, TX 78701                     │
-│  United States                        │
-└───────────────────────────────────────┘
+┌───── Random Address ─────┐
+│  1344 22nd Street South  │
+│  Saint Petersburg        │
+│  FL 33712                │
+│  United States           │
+└──────────────────────────┘
 (copied to clipboard)
 ```
 
