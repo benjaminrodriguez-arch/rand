@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Developer tool: pre-fetch 500 real addresses per supported country and save as
+Developer tool: pre-fetch 200 real addresses per supported country and save as
 data/XX.txt.gz. Run once from the project root before committing to GitHub.
 
 Usage:
@@ -190,8 +190,8 @@ def main():
     )
     parser.add_argument('--force', action='store_true',
                         help='Overwrite existing .txt.gz files')
-    parser.add_argument('--count', type=int, default=500,
-                        help='Addresses per country (default: 500)')
+    parser.add_argument('--count', type=int, default=200,
+                        help='Addresses per country (default: 200)')
     parser.add_argument('--countries', nargs='+',
                         help='Specific country codes (default: all 28)')
     args = parser.parse_args()

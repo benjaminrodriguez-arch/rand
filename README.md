@@ -41,7 +41,7 @@ rand -h                 # Show help
 
 ## Adding countries
 
-Every supported country ships with ~500 bundled addresses. Activating them requires no internet:
+Every supported country ships with ~200 bundled addresses. Activating them requires no internet:
 
 ```sh
 rand -download au 100   # Activate 100 Australian addresses instantly
@@ -51,7 +51,7 @@ rand -au                # Use it
 If you request more than the bundled reserve has, `rand` fetches the remainder from OpenStreetMap automatically:
 
 ```sh
-rand -download de 1000  # Uses all 500 from reserve, fetches 500 more online
+rand -download de 1000  # Uses all 200 from reserve, fetches 800 more online
 ```
 
 ## Supported countries (29)
@@ -63,7 +63,7 @@ Run `rand -list` to see which are active, which have reserve data ready, and how
 ## How it works
 
 - **US**: ~200 real addresses bundled and shuffled at install. Ready immediately.
-- **Other countries**: ~500 addresses per country bundled as compressed reserves (`data/XX.txt.gz`, total ~137 KB). Run `rand -download XX N` to activate N addresses instantly from reserve.
+- **Other countries**: ~200 addresses per country bundled as compressed reserves (`data/XX.txt.gz`). Run `rand -download XX N` to activate N addresses instantly from reserve.
 - **Cycling**: addresses are served sequentially from a local file. When fewer than 50 remain, new addresses are fetched from OpenStreetMap in the background.
 - **Pointer file**: each country has a pointer file (`~/.rand-self/XX_ptr`) tracking the current position. Atomic writes prevent race conditions under concurrent use.
 - **Data source**: all addresses are real locations from [OpenStreetMap](https://www.openstreetmap.org/) via the [Overpass API](https://overpass-api.de/).
